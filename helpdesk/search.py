@@ -89,6 +89,28 @@ def get_synonym_words() -> list[str]:
     return [r[0] for r in ret]
 
 
+def is_redisearch_available():
+	"""Checks if RediSearch is available"""
+	is_available = frappe.cache().get_value("helpdesk_redisearch_available")
+	if is_available is not None:
+		return is_available
+
+	try:
+		# We don't care about the response, just that the command is recognized.
+		# Using a non-existent index to avoid dependency on an existing one.
+		frappe.cache().execute_command("FT.INFO", "health_check")
+	except ResponseError as e:
+		if "unknown command" in str(e).lower():
+			frappe.cache().set_value("helpdesk_redisearch_available", False)
+			return False
+
+	# If we are here, it means either the command succeeded (unlikely for a fake index)
+	# or it failed with a message other than "unknown command" (e.g. "Unknown Index name"),
+	# which implies RediSearch is installed.
+	frappe.cache().set_value("helpdesk_redisearch_available", True)
+	return True
+
+
 class Search:
     unsafe_chars = re.compile(r"[\[\]{}<>+!-]")
 
@@ -343,6 +365,12 @@ class HelpdeskSearch(Search):
 def search(
     query, only_articles=False, qtype: Literal["and", "or"] = "and"
 ) -> list[dict[str, list[dict]]]:
+    if not is_redisearch_available():
+        frappe.log_error(
+            "Helpdesk Search: RediSearch is not available.", "RediSearch Not Available"
+        )
+        return []
+
     search = HelpdeskSearch()
     query = search.clean_query(query)
     query_parts: list[str] = query.split()
@@ -382,6 +410,12 @@ def search(
 @frappe.whitelist()
 @filelock("helpdesk_search_indexing", timeout=1)
 def build_index():
+    if not is_redisearch_available():
+        frappe.throw(
+            "RediSearch is not available on your Redis instance. Please install/enable it to use the search feature.",
+            title="RediSearch Not Available",
+        )
+
     frappe.cache().set_value("helpdesk_search_indexing_in_progress", True)
     search = HelpdeskSearch()
     search.build_index()
@@ -394,6 +428,9 @@ def build_index_in_background():
 
 
 def build_index_if_not_exists():
+    if not is_redisearch_available():
+        return
+
     search = HelpdeskSearch()
     if not search.index_exists():
         build_index()
